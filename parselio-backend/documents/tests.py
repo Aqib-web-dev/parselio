@@ -11,6 +11,8 @@ from documents.serializers import DocumentSerializer, MAX_DOCUMENT_SIZE_BYTES
 from tenants.models import Membership, Team, TeamMembership, Tenant
 from unittest.mock import patch
 
+from documents.tasks import process_document_upload
+
 pytestmark = pytest.mark.django_db
 
 
@@ -361,7 +363,10 @@ def test_process_document_upload_moves_uploaded_document_to_ready():
     team = create_team(tenant)
     document = create_document(tenant, team, status=Document.Status.UPLOADED)
 
-    process_document_upload(document.id)  # eager: runs the body inline, start to finish
+    with patch("documents.tasks.extract_text_from_document", return_value="Some real extracted text."):
+        # Stub S3 download + parse — this test asserts on the task's own status
+        # transitions, not on real extraction, so it must never touch AWS.
+        process_document_upload(document.id)  # eager: runs the body inline, start to finish
 
     document.refresh_from_db()
     assert document.status == Document.Status.READY
@@ -420,7 +425,8 @@ def test_process_document_upload_marks_failed_when_processing_raises():
         retry_calls.append(kwargs)
         raise _StopRetry
 
-    with patch("documents.tasks.Document.save", flaky_save), \
+    with patch("documents.tasks.extract_text_from_document", return_value="Some real extracted text."), \
+         patch("documents.tasks.Document.save", flaky_save), \
          patch("documents.tasks.process_document_upload.retry", side_effect=fake_retry):
         with pytest.raises(_StopRetry):
             process_document_upload(document.id)
@@ -445,3 +451,38 @@ def test_confirm_upload_queues_task_and_returns_202(mock_delay):
     assert response.status_code == 202
     assert response.data["status"] == Document.Status.UPLOADED  # status at queue time
     mock_delay.assert_called_once_with(document.id)  # task was handed off with the id
+
+def test_process_document_creates_chunks():
+    tenant = create_tenant()
+    doc = Document.objects.create(
+        tenant=tenant, visibility=Document.Visibility.COMPANY,
+        title="Handbook", original_filename="handbook.pdf",
+        file_key="tenants/x/documents/y/handbook.pdf",
+        status=Document.Status.UPLOADED,
+    )
+    long_text = "This is a sentence. " * 500      # ~10,000 chars → forces multiple chunks
+
+    with patch("documents.tasks.extract_text_from_document", return_value=long_text):
+        # Replace the real S3+parse call with a stub returning known text — the test never touches AWS.
+        process_document_upload(str(doc.id))       # runs inline (eager mode under pytest)
+
+    doc.refresh_from_db()
+    assert doc.status == Document.Status.READY     # happy path finished
+    chunks = list(doc.chunks.order_by("chunk_index"))
+    assert len(chunks) > 1                         # long text produced several chunks
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))  # 0,1,2,... contiguous
+    assert all(c.tenant_id == doc.tenant_id for c in chunks)            # tenant flowed onto every chunk
+
+
+def test_empty_text_marks_failed():
+    tenant = create_tenant()
+    doc = Document.objects.create(
+        tenant=tenant, visibility=Document.Visibility.COMPANY,
+        title="Scan", original_filename="scan.pdf",
+        file_key="k", status=Document.Status.UPLOADED,
+    )
+    with patch("documents.tasks.extract_text_from_document", return_value="   "):
+        process_document_upload(str(doc.id))       # simulate a scanned PDF → empty extraction
+    doc.refresh_from_db()
+    assert doc.status == Document.Status.FAILED     # policy: empty text fails, not "ready with 0 chunks"
+    assert doc.chunks.count() == 0
