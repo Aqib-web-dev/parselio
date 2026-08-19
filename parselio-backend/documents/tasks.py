@@ -1,7 +1,7 @@
 from celery import shared_task
 
 from .models import Document, DocumentChunk               # now also import DocumentChunk
-from .services import extract_text_from_document, chunk_text   # the two functions from increments 2–3
+from .services import extract_text_from_document, chunk_text, embed_text    # the two functions from increments 2–3
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=5)
@@ -28,8 +28,11 @@ def process_document_upload(self, document_id):
         document.chunks.all().delete()   # IDEMPOTENCY: clear any chunks from a previous partial run,
                                          # so a Celery retry can't crash on UniqueConstraint(document, chunk_index).
 
-        pieces = chunk_text(text)        # increment 2: split into list[str]
+        pieces = chunk_text(text)    
 
+        embeddings = [embed_text(piece) for piece in pieces]
+        # NEW: one Gemini API call per chunk, done BEFORE bulk_create so a failed embedding
+        # call raises here and marks the whole document FAILED — no half-embedded chunks saved.
         DocumentChunk.objects.bulk_create([
             # ONE database write for all chunks, not N — no per-row round trips.
             DocumentChunk(
@@ -37,6 +40,7 @@ def process_document_upload(self, document_id):
                 tenant=document.tenant,   # copy the tenant onto every chunk — isolation reaches the chunk layer
                 chunk_index=i,            # preserves reading order; also the field in the unique constraint
                 text=piece,
+                embedding=embeddings[i],  # ← NEW: the meaning-vector for this exact piece of text
             )
             for i, piece in enumerate(pieces)   # enumerate gives us (0, first), (1, second), ...
         ])

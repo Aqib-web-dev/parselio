@@ -2,6 +2,9 @@ import uuid
 
 import boto3
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from google import genai
+from google.genai import types
+from pgvector.django import CosineDistance
 
 from botocore.config import Config
 from django.conf import settings
@@ -12,6 +15,9 @@ from docx import Document as DocxDocument   # python-docx; aliased so it doesn't
 # Module-level constants — one obvious place to tune later (Day 20 evals), not magic numbers buried in code.
 CHUNK_SIZE = 2000       # ~500 tokens (≈4 chars/token). Counts CHARACTERS by default — the honest simple approach.
 CHUNK_OVERLAP = 200     # ~10% overlap → an idea split on a boundary still survives whole in one chunk.
+
+EMBEDDING_MODEL = "gemini-embedding-001"   # text-only Gemini embedding model
+EMBEDDING_DIMENSIONS = 768                 # must match DocumentChunk.embedding's VectorField(dimensions=768)
 
 def build_upload_key(tenant_id, filename):
     """Build a tenant-prefixed, collision-safe S3 key for a new document upload."""
@@ -86,3 +92,35 @@ def extract_text_from_document(document):
 
     raise ValueError(f"Unsupported file type: {document.original_filename}")
     # Anything else is a real error — the caller (the task) will catch it and mark the document FAILED.
+
+def _gemini_client():
+    """One place that builds the Gemini client (mirrors _s3_client above)."""
+    return genai.Client(api_key=settings.GEMINI_API_KEY)
+
+
+def embed_text(text):
+    """Turn one piece of text into a 768-dim embedding vector using Gemini."""
+    client = _gemini_client()
+    result = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=text,
+        config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIMENSIONS),
+        # output_dimensionality truncates Gemini's native (larger) vector down to 768 —
+        # must match DocumentChunk.embedding's VectorField(dimensions=768) exactly.
+    )
+    return result.embeddings[0].values   # plain list[float], length 768
+
+def find_similar_chunks(tenant, query_embedding, limit=5):
+    """Return the `limit` DocumentChunk rows in `tenant` closest in meaning to `query_embedding`."""
+    from .models import DocumentChunk   # local import avoids a circular import (models imports from tenants, not services)
+
+    return (
+        DocumentChunk.objects
+        .filter(tenant=tenant, embedding__isnull=False)
+        # tenant FIRST — never compare against another tenant's chunks (isolation rule from Day 8 onward).
+        # embedding__isnull=False — skip chunks that haven't finished the embed step yet.
+        .annotate(distance=CosineDistance("embedding", query_embedding))
+        # CosineDistance builds the "embedding <=> query_embedding" SQL expression pgvector provides.
+        .order_by("distance")[:limit]
+        # Smaller distance = more similar. This ORDER BY is what the pgvector index (Day 12) speeds up.
+    )

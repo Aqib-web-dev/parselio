@@ -1,7 +1,7 @@
 from django.db import models
 
 from tenants.models import Team, TenantScopedModel
-
+from pgvector.django import VectorField 
 
 class Document(TenantScopedModel):
     """Uploaded company document that can be company-wide or team-specific."""
@@ -50,6 +50,7 @@ class DocumentChunk(TenantScopedModel):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="chunks")
     chunk_index = models.PositiveIntegerField()
     text = models.TextField()
+    embedding = VectorField(dimensions=768, null=True, blank=True)
 
     class Meta:
         constraints = [

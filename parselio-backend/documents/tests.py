@@ -342,6 +342,7 @@ def test_upload_url_returns_presigned_url_for_valid_request(mock_presign):
 # ---------------------------------------------------------------------------
 
 from documents.tasks import process_document_upload  # noqa: E402
+from documents.services import find_similar_chunks  # noqa: E402
 
 
 def create_document(tenant, team, status=Document.Status.UPLOADED):
@@ -363,9 +364,9 @@ def test_process_document_upload_moves_uploaded_document_to_ready():
     team = create_team(tenant)
     document = create_document(tenant, team, status=Document.Status.UPLOADED)
 
-    with patch("documents.tasks.extract_text_from_document", return_value="Some real extracted text."):
-        # Stub S3 download + parse — this test asserts on the task's own status
-        # transitions, not on real extraction, so it must never touch AWS.
+    with patch("documents.tasks.extract_text_from_document", return_value="Some real extracted text."), \
+         patch("documents.tasks.embed_text", return_value=[0.0] * 768):
+        # Stub S3 download+parse, AND the Gemini call — this test must never touch AWS or the network.
         process_document_upload(document.id)  # eager: runs the body inline, start to finish
 
     document.refresh_from_db()
@@ -426,6 +427,7 @@ def test_process_document_upload_marks_failed_when_processing_raises():
         raise _StopRetry
 
     with patch("documents.tasks.extract_text_from_document", return_value="Some real extracted text."), \
+         patch("documents.tasks.embed_text", return_value=[0.0] * 768), \
          patch("documents.tasks.Document.save", flaky_save), \
          patch("documents.tasks.process_document_upload.retry", side_effect=fake_retry):
         with pytest.raises(_StopRetry):
@@ -462,8 +464,10 @@ def test_process_document_creates_chunks():
     )
     long_text = "This is a sentence. " * 500      # ~10,000 chars → forces multiple chunks
 
-    with patch("documents.tasks.extract_text_from_document", return_value=long_text):
-        # Replace the real S3+parse call with a stub returning known text — the test never touches AWS.
+    with patch("documents.tasks.extract_text_from_document", return_value=long_text), \
+         patch("documents.tasks.embed_text", return_value=[0.0] * 768):
+        # Replace the real S3+parse call, AND the real Gemini call, with stubs —
+        # the test never touches AWS or the network.
         process_document_upload(str(doc.id))       # runs inline (eager mode under pytest)
 
     doc.refresh_from_db()
@@ -472,6 +476,7 @@ def test_process_document_creates_chunks():
     assert len(chunks) > 1                         # long text produced several chunks
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))  # 0,1,2,... contiguous
     assert all(c.tenant_id == doc.tenant_id for c in chunks)            # tenant flowed onto every chunk
+    assert all(c.embedding is not None for c in chunks)                 # Day 11: every chunk got a vector
 
 
 def test_empty_text_marks_failed():
@@ -485,4 +490,83 @@ def test_empty_text_marks_failed():
         process_document_upload(str(doc.id))       # simulate a scanned PDF → empty extraction
     doc.refresh_from_db()
     assert doc.status == Document.Status.FAILED     # policy: empty text fails, not "ready with 0 chunks"
-    assert doc.chunks.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Day 11: embeddings + pgvector similarity search (find_similar_chunks)
+#
+# pgvector's Postgres column enforces its declared dimension (768) at the DB
+# level — a genuinely short toy vector like [0.9, 0.1, 0.0] raises
+# "DataError: expected 768 dimensions, not 3" the moment you try to insert it.
+# _toy_vector() pads whatever values matter for the test out to 768 with zeros.
+# ---------------------------------------------------------------------------
+
+def _toy_vector(*first_values):
+    """768-dim vector whose first few values are what matters for the test's angle; rest is zero-padding."""
+    return list(first_values) + [0.0] * (768 - len(first_values))
+
+
+def _make_chunk(tenant, document, index, text, vector):
+    """Create one DocumentChunk with a hand-built embedding — no real Gemini call needed."""
+    return DocumentChunk.objects.create(
+        tenant=tenant, document=document, chunk_index=index, text=text, embedding=vector,
+    )
+
+
+def test_find_similar_chunks_ranks_by_cosine_distance():
+    """Given a query vector, the closest-direction chunk vector should rank first."""
+    tenant = create_tenant()
+    doc = Document.objects.create(
+        tenant=tenant, visibility=Document.Visibility.COMPANY,
+        title="Handbook", original_filename="handbook.pdf",
+        file_key="k", status=Document.Status.READY,
+    )
+    # Same 2D-angle idea as the lesson's diagram, padded to the real 768 dimensions.
+    close_chunk = _make_chunk(tenant, doc, 0, "resignation notice policy", _toy_vector(0.9, 0.1))
+    far_chunk = _make_chunk(tenant, doc, 1, "quarterly revenue report", _toy_vector(-0.6, 0.7))
+
+    query_vector = _toy_vector(0.8, 0.3)   # points the same general direction as close_chunk
+
+    results = list(find_similar_chunks(tenant, query_vector, limit=5))
+
+    assert results[0].id == close_chunk.id          # nearest-direction vector ranks first
+    assert results[1].id == far_chunk.id
+    assert results[0].distance < results[1].distance  # smaller distance = more similar
+
+
+def test_find_similar_chunks_only_returns_requesting_tenants_rows():
+    """Tenant isolation must hold for similarity search exactly like every other query."""
+    tenant_a = create_tenant(slug="acme")
+    tenant_b = create_tenant(slug="globex")
+    doc_a = Document.objects.create(
+        tenant=tenant_a, visibility=Document.Visibility.COMPANY,
+        title="A", original_filename="a.pdf", file_key="k", status=Document.Status.READY,
+    )
+    doc_b = Document.objects.create(
+        tenant=tenant_b, visibility=Document.Visibility.COMPANY,
+        title="B", original_filename="b.pdf", file_key="k", status=Document.Status.READY,
+    )
+    _make_chunk(tenant_a, doc_a, 0, "tenant A chunk", _toy_vector(1.0))
+    _make_chunk(tenant_b, doc_b, 0, "tenant B chunk", _toy_vector(1.0))  # identical vector, other tenant
+
+    results = list(find_similar_chunks(tenant_a, _toy_vector(1.0)))
+
+    assert len(results) == 1                    # tenant B's identical-vector chunk must never appear
+    assert results[0].tenant_id == tenant_a.id
+
+
+def test_find_similar_chunks_skips_chunks_without_an_embedding():
+    """A chunk that hasn't finished the embed step yet must not crash or appear in results."""
+    tenant = create_tenant()
+    doc = Document.objects.create(
+        tenant=tenant, visibility=Document.Visibility.COMPANY,
+        title="Handbook", original_filename="handbook.pdf",
+        file_key="k", status=Document.Status.PROCESSING,
+    )
+    DocumentChunk.objects.create(tenant=tenant, document=doc, chunk_index=0, text="no embedding yet")
+    # embedding left at its default (null) — simulates the moment between chunking and embedding.
+
+    results = list(find_similar_chunks(tenant, _toy_vector(1.0)))
+
+    assert results == []               # the un-embedded chunk must not appear
+    assert doc.chunks.count() == 1      # the row itself still exists — just not embedded yet
