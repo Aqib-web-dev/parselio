@@ -18,6 +18,7 @@ from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView
 from accounts.views import ParselioTokenObtainPairView
+from django.conf import settings
 
 urlpatterns = [
     path("api/token/", ParselioTokenObtainPairView.as_view(), name="token_obtain_pair"),
@@ -26,3 +27,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("documents.urls")),
 ]
+if settings.DEBUG:
+    import debug_toolbar
+    urlpatterns += [path("__debug__/", include(debug_toolbar.urls))]

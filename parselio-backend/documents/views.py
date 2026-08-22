@@ -1,4 +1,4 @@
-from django.db.models import Q
+from django.db.models import Count, Q
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -49,6 +49,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 | Q(visibility=Document.Visibility.TEAM, team_id__in=team_ids)
             )
             .select_related("tenant", "team")
+            .annotate(chunk_count=Count("chunks"))
             .order_by("-created_at")
         )
 

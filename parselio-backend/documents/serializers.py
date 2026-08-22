@@ -27,7 +27,7 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     file_size = serializers.IntegerField(write_only=True, required=True)
     content_type = serializers.CharField(write_only=True, required=True)
-    chunk_count = serializers.SerializerMethodField()
+    chunk_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Document
@@ -47,10 +47,6 @@ class DocumentSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "tenant", "status", "chunk_count", "created_at", "updated_at"]
-
-    def get_chunk_count(self, obj):
-        """Return how many chunks are connected to this document."""
-        return obj.chunks.count()
 
     def validate_file_size(self, value):
         """Reject uploaded files larger than the allowed size."""
