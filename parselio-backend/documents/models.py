@@ -14,6 +14,7 @@ class Document(TenantScopedModel):
         UPLOADED = "uploaded", "Uploaded"
         PROCESSING = "processing", "Processing"
         READY = "ready", "Ready"
+        PARTIAL_FAILURE = "partial_failure", "Partial Failure" 
         FAILED = "failed", "Failed"
 
     visibility = models.CharField(max_length=20, choices=Visibility.choices, default=Visibility.TEAM)
@@ -51,6 +52,7 @@ class DocumentChunk(TenantScopedModel):
     chunk_index = models.PositiveIntegerField()
     text = models.TextField()
     embedding = VectorField(dimensions=768, null=True, blank=True)
+    embedding_error = models.TextField(blank=True, default="")
 
     class Meta:
         constraints = [

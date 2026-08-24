@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import Count
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -155,7 +156,10 @@ def test_document_serializer_counts_chunks_in_output():
     DocumentChunk.objects.create(tenant=tenant, document=document, chunk_index=0, text="First chunk")
     DocumentChunk.objects.create(tenant=tenant, document=document, chunk_index=1, text="Second chunk")
 
-    data = DocumentSerializer(document).data
+    # chunk_count now comes from .annotate() in views.py's queryset, not a SerializerMethodField —
+    # so the serializer needs an annotated instance, same as it would get from a real request.
+    annotated_document = Document.objects.annotate(chunk_count=Count("chunks")).get(pk=document.pk)
+    data = DocumentSerializer(annotated_document).data
 
     assert data["chunk_count"] == 2
     assert "file_size" not in data
@@ -570,3 +574,43 @@ def test_find_similar_chunks_skips_chunks_without_an_embedding():
 
     assert results == []               # the un-embedded chunk must not appear
     assert doc.chunks.count() == 1      # the row itself still exists — just not embedded yet
+
+def test_process_document_partial_failure_keeps_successful_chunks():
+    tenant = create_tenant()
+    team = create_team(tenant)
+    document = create_document(tenant, team, status=Document.Status.UPLOADED)
+    long_text = "This is a sentence. " * 500      # ~10,000 chars → forces multiple chunks, same as test_process_document_creates_chunks
+
+    call_count = {"n": 0}
+
+    def flaky_embed(piece):
+        call_count["n"] += 1
+        if call_count["n"] == 2:                 # fail only the second chunk embedded
+            raise RuntimeError("Gemini timed out")
+        return [0.0] * 768
+
+    with patch("documents.tasks.extract_text_from_document", return_value=long_text), \
+         patch("documents.tasks.embed_text", side_effect=flaky_embed):
+        process_document_upload(document.id)
+
+    document.refresh_from_db()
+    assert document.status == Document.Status.PARTIAL_FAILURE
+
+    chunks = list(document.chunks.order_by("chunk_index"))
+    assert len(chunks) > 1                       # nothing was lost — same count as if nothing had failed
+    assert chunks[0].embedding is not None       # chunk 0 succeeded
+    assert chunks[1].embedding is None           # chunk 1 failed
+    assert chunks[1].embedding_error == "Gemini timed out"
+    assert chunks[2].embedding is not None       # chunk 2 still ran
+
+
+def test_process_document_extraction_failure_does_not_get_stuck_processing():
+    tenant = create_tenant()
+    team = create_team(tenant)
+    document = create_document(tenant, team, status=Document.Status.UPLOADED)
+    with patch("documents.tasks.extract_text_from_document", side_effect=RuntimeError("S3 object missing")), \
+         patch("documents.tasks.process_document_upload.retry", side_effect=_StopRetry):
+        with pytest.raises(_StopRetry):
+            process_document_upload(document.id)
+    document.refresh_from_db()
+    assert document.status == Document.Status.FAILED   # not stuck on PROCESSING

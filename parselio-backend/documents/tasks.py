@@ -28,24 +28,41 @@ def process_document_upload(self, document_id):
         document.chunks.all().delete()   # IDEMPOTENCY: clear any chunks from a previous partial run,
                                          # so a Celery retry can't crash on UniqueConstraint(document, chunk_index).
 
-        pieces = chunk_text(text)    
+        pieces = chunk_text(text)
 
-        embeddings = [embed_text(piece) for piece in pieces]
-        # NEW: one Gemini API call per chunk, done BEFORE bulk_create so a failed embedding
-        # call raises here and marks the whole document FAILED — no half-embedded chunks saved.
-        DocumentChunk.objects.bulk_create([
-            # ONE database write for all chunks, not N — no per-row round trips.
-            DocumentChunk(
-                document=document,
-                tenant=document.tenant,   # copy the tenant onto every chunk — isolation reaches the chunk layer
-                chunk_index=i,            # preserves reading order; also the field in the unique constraint
-                text=piece,
-                embedding=embeddings[i],  # ← NEW: the meaning-vector for this exact piece of text
-            )
-            for i, piece in enumerate(pieces)   # enumerate gives us (0, first), (1, second), ...
-        ])
+        new_chunks = []
+        any_failed = False
+        for i, piece in enumerate(pieces):        # enumerate gives us (0, first), (1, second), ...
+            try:
+                vector = embed_text(piece)        # one Gemini API call for this chunk only
+                new_chunks.append(DocumentChunk(
+                    document=document,
+                    tenant=document.tenant,       # copy the tenant onto every chunk — isolation reaches the chunk layer
+                    chunk_index=i,                # preserves reading order; also the field in the unique constraint
+                    text=piece,
+                    embedding=vector,
+                ))
+            except Exception as exc:
+                # this one chunk's embedding failed — keep the text anyway, with no vector,
+                # and a note explaining why. Move to the next chunk instead of losing
+                # everything embedded so far.
+                new_chunks.append(DocumentChunk(
+                    document=document,
+                    tenant=document.tenant,
+                    chunk_index=i,
+                    text=piece,
+                    embedding=None,
+                    embedding_error=str(exc),
+                ))
+                any_failed = True
 
-        document.status = Document.Status.READY   # the document is now searchable-ready
+        DocumentChunk.objects.bulk_create(new_chunks)
+        # still ONE database write for all chunks, not N — the save is no longer gated
+        # behind every single embedding succeeding, only behind the loop finishing.
+
+        document.status = (
+            Document.Status.PARTIAL_FAILURE if any_failed else Document.Status.READY
+        )
         document.save(update_fields=["status"])
 
     except Exception as exc:
