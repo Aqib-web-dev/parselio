@@ -13,6 +13,7 @@ from tenants.models import Membership, Team, TeamMembership, Tenant
 from unittest.mock import patch
 
 from documents.tasks import process_document_upload
+from documents.services import retrieve
 
 pytestmark = pytest.mark.django_db
 
@@ -614,3 +615,29 @@ def test_process_document_extraction_failure_does_not_get_stuck_processing():
             process_document_upload(document.id)
     document.refresh_from_db()
     assert document.status == Document.Status.FAILED   # not stuck on PROCESSING
+
+def test_retrieve_returns_list():
+    """retrieve() returns a list even with zero matching chunks."""
+    tenant = create_tenant()
+    user, _membership = create_membership(tenant, "retrieve_user")
+    with patch("documents.services.embed_text", return_value=[0.1] * 768):
+        result = retrieve(tenant, user, "query", top_k=5)
+    assert isinstance(result, list)
+
+
+def test_retrieve_respects_tenant_isolation():
+    """retrieve() never returns chunks from another tenant."""
+    tenant = create_tenant()
+    user, _membership = create_membership(tenant, "retrieve_user")
+
+    other_tenant = create_tenant(slug="other")
+    # Create a document in OTHER tenant — retrieve() for `tenant` must not return its chunks
+    Document.objects.create(
+        tenant=other_tenant, title="Other Doc",
+        original_filename="x.pdf",
+        visibility=Document.Visibility.COMPANY, status=Document.Status.READY,
+    )
+    with patch("documents.services.embed_text", return_value=[1.0] * 768):
+        result = retrieve(tenant, user, "risk", top_k=10)
+    chunk_tenant_ids = {c.tenant_id for c in result}
+    assert other_tenant.id not in chunk_tenant_ids

@@ -11,6 +11,8 @@ from django.conf import settings
 import io                         # to wrap downloaded bytes in a file-like object
 from pypdf import PdfReader        # PDF reader
 from docx import Document as DocxDocument   # python-docx; aliased so it doesn't clash with our Document model
+from django.contrib.postgres.search import SearchQuery, SearchRank
+from django.db.models import Q
 
 # Module-level constants — one obvious place to tune later (Day 20 evals), not magic numbers buried in code.
 CHUNK_SIZE = 2000       # ~500 tokens (≈4 chars/token). Counts CHARACTERS by default — the honest simple approach.
@@ -22,6 +24,28 @@ EMBEDDING_DIMENSIONS = 768                 # must match DocumentChunk.embedding'
 def build_upload_key(tenant_id, filename):
     """Build a tenant-prefixed, collision-safe S3 key for a new document upload."""
     return f"tenants/{tenant_id}/documents/{uuid.uuid4()}/{filename}"
+
+def _visibility_scoped_chunks(tenant, user):
+    """DocumentChunks the user can see: company-wide + all chunks in their teams."""
+    from .models import DocumentChunk, Document   # local import avoids circular refs
+    from tenants.models import TeamMembership
+
+    user_team_ids = (
+        TeamMembership.objects
+        .filter(membership__user=user, membership__tenant=tenant)
+        .values_list('team_id', flat=True)
+    )
+    # Sub-query: which teams does this user belong to inside this tenant?
+    # The membership FK chain: TeamMembership → Membership → (user, tenant)
+
+    return DocumentChunk.objects.filter(
+        tenant=tenant          # ALWAYS tenant first — isolation rule
+    ).filter(
+        Q(document__visibility=Document.Visibility.COMPANY)           # company-wide docs always visible
+        | Q(document__visibility=Document.Visibility.TEAM,
+            document__team_id__in=user_team_ids)                      # team docs only if user is in that team
+    )
+
 
 
 def generate_presigned_upload(key, content_type):
@@ -124,3 +148,68 @@ def find_similar_chunks(tenant, query_embedding, limit=5):
         .order_by("distance")[:limit]
         # Smaller distance = more similar. This ORDER BY is what the pgvector index (Day 12) speeds up.
     )
+
+
+def retrieve(tenant, user, query, top_k=10):
+    """
+    Hybrid retrieval: 60% vector similarity + 40% full-text keyword search.
+
+    Returns top_k DocumentChunk rows ranked by combined score,
+    scoped to what the user is permitted to see within tenant.
+    """
+    # 1. Scope: only chunks this user can access
+    base_qs = _visibility_scoped_chunks(tenant, user)
+
+    # 2. Embed the query — one Gemini API call
+    query_embedding = embed_text(query)
+
+    # 3. Fetch vector and keyword candidates SEPARATELY, then union.
+    # A single query ordered by vector_distance only would silently drop a chunk that's
+    # a strong keyword match but semantically distant (e.g. ranked 50th on vector) —
+    # its text_rank never gets computed because it's cut before annotation matters.
+    search_query = SearchQuery(query, config='english')
+
+    vector_candidate_ids = (
+        base_qs
+        .filter(embedding__isnull=False)          # skip chunks that failed embedding
+        .annotate(vector_distance=CosineDistance('embedding', query_embedding))
+        .order_by('vector_distance')
+        .values_list('id', flat=True)[:top_k * 2]
+    )
+
+    keyword_candidate_ids = (
+        base_qs
+        .filter(search_vector__isnull=False)
+        .annotate(text_rank=SearchRank('search_vector', search_query))
+        .filter(text_rank__gt=0)                  # exclude non-matches, not just null search_vector
+        .order_by('-text_rank')
+        .values_list('id', flat=True)[:top_k * 2]
+    )
+
+    candidate_ids = set(vector_candidate_ids) | set(keyword_candidate_ids)
+
+    # 4. Re-annotate the union with BOTH scores in one query, then re-rank in Python
+    candidates = list(
+        base_qs
+        .filter(id__in=candidate_ids)
+        .annotate(
+            vector_distance=CosineDistance('embedding', query_embedding),
+            # CosineDistance builds the pgvector "embedding <=> query_vec" expression
+            text_rank=SearchRank('search_vector', search_query),
+            # SearchRank builds ts_rank(search_vector, to_tsquery('english', 'query'))
+            # Returns 0.0 if search_vector is null or no match; up to ~1.0 for strong match
+        )
+    )
+    scored = []
+    for chunk in candidates:
+        # A chunk can enter this set via keyword match alone, so vector_distance may be None
+        # (chunk.embedding is null) — treat "no vector signal" as similarity 0, not a crash.
+        vector_score = max(0.0, 1.0 - float(chunk.vector_distance)) if chunk.vector_distance is not None else 0.0
+        # cosine distance → similarity: distance of 0 = perfect match, 1 = orthogonal
+        keyword_score = float(chunk.text_rank)
+        # SearchRank is already 0–1
+        combined = 0.6 * vector_score + 0.4 * keyword_score
+        scored.append((combined, chunk))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [chunk for _, chunk in scored[:top_k]]

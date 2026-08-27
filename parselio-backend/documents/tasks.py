@@ -1,6 +1,7 @@
 from celery import shared_task
 
-from .models import Document, DocumentChunk               # now also import DocumentChunk
+from .models import Document, DocumentChunk
+from django.contrib.postgres.search import SearchVector 
 from .services import extract_text_from_document, chunk_text, embed_text    # the two functions from increments 2–3
 
 
@@ -59,6 +60,9 @@ def process_document_upload(self, document_id):
         DocumentChunk.objects.bulk_create(new_chunks)
         # still ONE database write for all chunks, not N — the save is no longer gated
         # behind every single embedding succeeding, only behind the loop finishing.
+        document.chunks.update(                                        # ADD THESE 2 LINES
+            search_vector=SearchVector('text', config='english')
+        )
 
         document.status = (
             Document.Status.PARTIAL_FAILURE if any_failed else Document.Status.READY

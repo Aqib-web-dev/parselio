@@ -1,4 +1,6 @@
 from django.db import models
+from django.contrib.postgres.search import SearchVectorField   
+from django.contrib.postgres.indexes import GinIndex           
 
 from tenants.models import Team, TenantScopedModel
 from pgvector.django import VectorField 
@@ -53,6 +55,7 @@ class DocumentChunk(TenantScopedModel):
     text = models.TextField()
     embedding = VectorField(dimensions=768, null=True, blank=True)
     embedding_error = models.TextField(blank=True, default="")
+    search_vector = SearchVectorField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -60,4 +63,5 @@ class DocumentChunk(TenantScopedModel):
         ]
         indexes = [
             models.Index(fields=["tenant", "document"]),
+            GinIndex(fields=["search_vector"], name="documentchunk_searchvec_gin"),
         ]
