@@ -5,6 +5,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from google import genai
 from google.genai import types
 from pgvector.django import CosineDistance
+import cohere
+from litellm import completion
 
 from botocore.config import Config
 from django.conf import settings
@@ -213,3 +215,58 @@ def retrieve(tenant, user, query, top_k=10):
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [chunk for _, chunk in scored[:top_k]]
+
+def _cohere_client():
+    """One place that builds the Cohere client"""
+    return cohere.Client(api_key=settings.COHERE_API_KEY)
+
+def rerank(query, chunks, top_n=5):
+    """Cross-encoder rerank: reorder `chunks` by true relevance to `query`, keep the best top_n."""
+    if not chunks:
+        return []
+    # Guard against an empty candidate list — calling Cohere with documents=[] is a wasted API call.
+
+    client = _cohere_client()
+    response = client.rerank(
+        model="rerank-english-v3.0",
+        query=query,
+        documents=[chunk.text for chunk in chunks],
+        top_n=min(top_n, len(chunks)),
+        # min() guards the case where fewer than top_n candidates were retrieved at all —
+        # asking Cohere for more results than documents provided would error.
+    )
+    return [chunks[result.index] for result in response.results]
+
+GENERATION_MODEL = "gemini/gemini-3.6-flash"
+# LiteLLM needs the "gemini/" prefix to route the call. Reuses GEMINI_API_KEY —
+# the same key embed_text() already uses — since LiteLLM's Gemini provider reads
+# that exact env var name. gemini-2.5-flash was Google's model at the time this
+# lesson was first written but is no longer available to new API callers —
+# always check https://ai.google.dev/gemini-api/docs/models for the current name.
+# Switch to "anthropic/claude-sonnet-5" once Console API credits are funded
+# (separate billing from a Claude.ai/Claude Code subscription).
+
+SYSTEM_PROMPT = """You are Parselio's document assistant. Answer the user's question using
+ONLY the numbered context chunks below. Cite the chunk number in square brackets
+after every claim, like [2]. If the context does not contain the answer, say
+"I don't have enough information in the provided documents to answer that."
+Never use knowledge outside the provided context."""
+
+def generate_answer(query, chunks):
+    """Generate a cited answer to `query`, grounded only in `chunks`."""
+    if not chunks:
+        return "I don't have enough information in the provided documents to answer that."
+    # Same escape hatch the prompt teaches the model — applied in code too, so an empty
+    # rerank result doesn't waste an LLM call just to get told the same thing.
+
+    context = "\n\n".join(
+        f"[{i+1}] {chunk.text}" for i, chunk in enumerate(chunks)
+    )
+    response = completion(
+        model=GENERATION_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
+        ],
+    )
+    return response.choices[0].message.content

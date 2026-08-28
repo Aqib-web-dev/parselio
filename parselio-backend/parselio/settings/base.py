@@ -131,6 +131,9 @@ AWS_S3_SIGNATURE_VERSION = "s3v4"
 AWS_QUERYSTRING_EXPIRE = 300
 
 GEMINI_API_KEY = env("GEMINI_API_KEY", default=None)
+COHERE_API_KEY = env("COHERE_API_KEY", default=None)
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default=None)
+
 # DB 1 isolates Parselio's queue from other local projects sharing this Redis
 # (DB 0 is used by another project — a shared broker+DB makes workers pick up
 # each other's tasks, causing "Received unregistered task" errors).
