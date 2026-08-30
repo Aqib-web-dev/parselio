@@ -38,6 +38,9 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [              
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_THROTTLE_RATES": {
+        "chat": "20/minute",
+    },
 }
 
 SIMPLE_JWT = {
@@ -142,3 +145,10 @@ CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:
 CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_TRACK_STARTED = True
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("REDIS_CACHE_URL", default="redis://localhost:6379/2"),
+    }
+}

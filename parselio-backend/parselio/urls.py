@@ -24,8 +24,8 @@ urlpatterns = [
     path("api/token/", ParselioTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include("documents.urls")),
+    path("api/chat/", include("chat.urls")),
     path("admin/", admin.site.urls),
-    path("api/", include("documents.urls")),
 ]
 if settings.DEBUG:
     import debug_toolbar

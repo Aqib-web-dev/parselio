@@ -7,6 +7,9 @@ from google.genai import types
 from pgvector.django import CosineDistance
 import cohere
 from litellm import completion
+import hashlib
+import json
+from django.core.cache import cache
 
 from botocore.config import Config
 from django.conf import settings
@@ -22,6 +25,7 @@ CHUNK_OVERLAP = 200     # ~10% overlap → an idea split on a boundary still sur
 
 EMBEDDING_MODEL = "gemini-embedding-001"   # text-only Gemini embedding model
 EMBEDDING_DIMENSIONS = 768                 # must match DocumentChunk.embedding's VectorField(dimensions=768)
+EMBEDDING_CACHE_TTL = 3600  
 
 def build_upload_key(tenant_id, filename):
     """Build a tenant-prefixed, collision-safe S3 key for a new document upload."""
@@ -116,6 +120,10 @@ def extract_text_from_document(document):
         return "\n".join(p.text for p in docx.paragraphs)
         # Plain paragraph text. (Tables/headers need extra handling — noted as a known limitation, not today's job.)
 
+    if filename.endswith(".txt"):
+        return raw.decode("utf-8")
+        # Plain text file — the downloaded bytes already ARE the text, no parsing library needed.
+
     raise ValueError(f"Unsupported file type: {document.original_filename}")
     # Anything else is a real error — the caller (the task) will catch it and mark the document FAILED.
 
@@ -163,7 +171,8 @@ def retrieve(tenant, user, query, top_k=10):
     base_qs = _visibility_scoped_chunks(tenant, user)
 
     # 2. Embed the query — one Gemini API call
-    query_embedding = embed_text(query)
+    # query_embedding = embed_text(query)
+    query_embedding = embed_text_cached(tenant.id, query)
 
     # 3. Fetch vector and keyword candidates SEPARATELY, then union.
     # A single query ordered by vector_distance only would silently drop a chunk that's
@@ -270,3 +279,20 @@ def generate_answer(query, chunks):
         ],
     )
     return response.choices[0].message.content
+
+def _embedding_cache_key(tenant_id, query):
+    """Deterministic, fixed-length, tenant-scoped Redis key for one query's embedding."""
+    query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    return f"query_embedding:v1:{tenant_id}:{query_hash}"
+
+def embed_text_cached(tenant_id, query):
+    """Cache-aside wrapper around embed_text(). Same return shape: list[float], length 768."""
+    key = _embedding_cache_key(tenant_id, query)
+
+    cached = cache.get(key)
+    if cached is not None:
+        return json.loads(cached)   # HIT — no Gemini call this request
+
+    embedding = embed_text(query)     # MISS — real Gemini API call (Day 11)
+    cache.set(key, json.dumps(embedding), timeout=EMBEDDING_CACHE_TTL)
+    return embedding
