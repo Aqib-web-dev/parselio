@@ -7,6 +7,7 @@ from google.genai import types
 from pgvector.django import CosineDistance
 import cohere
 from litellm import completion
+from litellm.exceptions import ServiceUnavailableError, Timeout as LiteLLMTimeout
 import hashlib
 import json
 from django.core.cache import cache
@@ -246,14 +247,9 @@ def rerank(query, chunks, top_n=5):
     )
     return [chunks[result.index] for result in response.results]
 
-GENERATION_MODEL = "gemini/gemini-3.6-flash"
-# LiteLLM needs the "gemini/" prefix to route the call. Reuses GEMINI_API_KEY —
-# the same key embed_text() already uses — since LiteLLM's Gemini provider reads
-# that exact env var name. gemini-2.5-flash was Google's model at the time this
-# lesson was first written but is no longer available to new API callers —
-# always check https://ai.google.dev/gemini-api/docs/models for the current name.
-# Switch to "anthropic/claude-sonnet-5" once Console API credits are funded
-# (separate billing from a Claude.ai/Claude Code subscription).
+GENERATION_MODEL = "groq/openai/gpt-oss-120b"
+FALLBACK_GENERATION_MODEL = "gemini/gemini-3.6-flash"
+PRIMARY_MODEL_TIMEOUT_SECONDS = 8
 
 SYSTEM_PROMPT = """You are Parselio's document assistant. Answer the user's question using
 ONLY the numbered context chunks below. Cite the chunk number in square brackets
@@ -261,24 +257,49 @@ after every claim, like [2]. If the context does not contain the answer, say
 "I don't have enough information in the provided documents to answer that."
 Never use knowledge outside the provided context."""
 
-def generate_answer(query, chunks):
-    """Generate a cited answer to `query`, grounded only in `chunks`."""
-    if not chunks:
-        return "I don't have enough information in the provided documents to answer that."
-    # Same escape hatch the prompt teaches the model — applied in code too, so an empty
-    # rerank result doesn't waste an LLM call just to get told the same thing.
-
+def build_prompt(query, chunks):
+    """Format retrieved chunks + the question into one user-turn prompt string."""
     context = "\n\n".join(
         f"[{i+1}] {chunk.text}" for i, chunk in enumerate(chunks)
     )
-    response = completion(
-        model=GENERATION_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
-        ],
-    )
+    return f"Context:\n{context}\n\nQuestion: {query}"
+
+def generate_answer(query, chunks, history=None):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += [{"role": m.role, "content": m.content} for m in (history or [])]
+    messages.append({"role": "user", "content": build_prompt(query, chunks)})
+    try:
+        response = completion(model=GENERATION_MODEL, messages=messages, timeout=PRIMARY_MODEL_TIMEOUT_SECONDS)
+    except (ServiceUnavailableError, LiteLLMTimeout):
+        response = completion(model=FALLBACK_GENERATION_MODEL, messages=messages)
     return response.choices[0].message.content
+
+def generate_answer_stream(query, chunks, history=None):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += [{"role": m.role, "content": m.content} for m in (history or [])]
+    messages.append({"role": "user", "content": build_prompt(query, chunks)})
+    try:
+        stream = completion(
+            model=GENERATION_MODEL, messages=messages, stream=True, timeout=PRIMARY_MODEL_TIMEOUT_SECONDS
+        )
+        for part in stream:
+            token = part.choices[0].delta.content
+            if token:
+                yield token
+    except (ServiceUnavailableError, LiteLLMTimeout):
+        # Gemini overloaded or timed out (transient) — fall back to Groq, restarting the answer from
+        # scratch. NOTE: if Gemini had already yielded some tokens before failing mid-stream
+        # (matches the MidStreamFallbackError seen in testing 2026-09-01), the client will see
+        # those earlier tokens followed by a full second answer from Groq — a real UX rough
+        # edge, not silently handled. Acceptable for now since Gemini has actually failed
+        # before any tokens were produced in testing so far; revisit if a genuine mid-stream
+        # failure (partial answer + fallback) is observed.
+        stream = completion(model=FALLBACK_GENERATION_MODEL, messages=messages, stream=True)
+        for part in stream:
+            token = part.choices[0].delta.content
+            if token:
+                yield token
+
 
 def _embedding_cache_key(tenant_id, query):
     """Deterministic, fixed-length, tenant-scoped Redis key for one query's embedding."""

@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 class ChatRequestSerializer(serializers.Serializer):
     query = serializers.CharField(min_length=1, max_length=2000)
+    conversation_id = serializers.UUIDField(required=False, allow_null=True)
 
 
 class CitationSerializer(serializers.Serializer):
@@ -14,4 +15,5 @@ class CitationSerializer(serializers.Serializer):
 
 class ChatResponseSerializer(serializers.Serializer):
     answer = serializers.CharField()
+    conversation_id = serializers.UUIDField()
     citations = CitationSerializer(many=True)
