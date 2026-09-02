@@ -1,0 +1,52 @@
+[
+  {
+    "id": "leave-01",
+    "user_input": "How many paid leave days do full-time employees get per year?",
+    "reference": "Full-time employees accrue 20 days of paid annual leave per year."
+  },
+  {
+    "id": "leave-02",
+    "user_input": "Can I carry over unused leave to next year?",
+    "reference": "Yes, unused leave days roll over to the next year, up to a maximum of 5 days."
+  },
+  {
+    "id": "leave-03",
+    "user_input": "How much notice do I need to give before taking leave?",
+    "reference": "Leave requests must be submitted at least 2 weeks in advance, through the HR portal."
+  },
+  {
+    "id": "leave-04",
+    "user_input": "Does sick leave count against my annual leave balance?",
+    "reference": "No, sick leave is tracked separately and does not count against annual leave."
+  },
+  {
+    "id": "leave-05",
+    "user_input": "If I have 8 unused leave days at year end, how many carry over?",
+    "reference": "Only 5 days carry over, since that is the maximum rollover cap, even though 8 days were unused."
+  },
+  {
+    "id": "leave-06",
+    "user_input": "Where do I submit a leave request?",
+    "reference": "Through the HR portal."
+  },
+  {
+    "id": "leave-07",
+    "user_input": "Is there a separate leave policy for part-time employees?",
+    "reference": "Not specified in the policy. It only states leave accrual for full-time employees."
+  },
+  {
+    "id": "leave-08",
+    "user_input": "What's the maximum number of leave days I can roll over?",
+    "reference": "A maximum of 5 days can roll over to the next year."
+  },
+  {
+    "id": "leave-09",
+    "user_input": "Do I need approval before going on leave, or can I just take it?",
+    "reference": "Leave requests must be submitted at least 2 weeks in advance through the HR portal, implying approval through that process before leave is taken."
+  },
+  {
+    "id": "leave-10",
+    "user_input": "If I'm out sick, does that use up my annual leave days?",
+    "reference": "No. Sick leave is tracked separately from annual leave and does not reduce the annual leave balance."
+  }
+]
