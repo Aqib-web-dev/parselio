@@ -21,12 +21,14 @@ from accounts.views import ParselioTokenObtainPairView
 from django.conf import settings
 
 urlpatterns = [
-    path("api/token/", ParselioTokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("api/", include("documents.urls")),
-    path("api/chat/", include("chat.urls")),
+    path("api/v1/token/", ParselioTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/v1/", include("documents.urls")),
+    path("api/v1/chat/", include("chat.urls")),
     path("admin/", admin.site.urls),
 ]
+
+
 if settings.DEBUG:
     import debug_toolbar
     urlpatterns += [path("__debug__/", include(debug_toolbar.urls))]

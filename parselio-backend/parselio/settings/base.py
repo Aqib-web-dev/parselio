@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
+    "django_filters",
 
     # Local apps
     "accounts",
@@ -29,6 +30,7 @@ INSTALLED_APPS = [
     "documents",
     "chat",
     "billing",
+
 ]
 
 REST_FRAMEWORK = {
@@ -41,6 +43,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "chat": "20/minute",
     },
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.CursorPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+    ],
 }
 
 SIMPLE_JWT = {

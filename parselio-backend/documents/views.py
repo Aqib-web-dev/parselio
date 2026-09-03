@@ -19,10 +19,18 @@ from tenants.models import Membership, TeamMembership
 from .models import Document
 from .serializers import DocumentSerializer
 
+from rest_framework.pagination import CursorPagination
+from documents.filters import DocumentFilter
+
+class DocumentCursorPagination(CursorPagination):
+    page_size = 20
+    ordering = "-created_at"
 
 class DocumentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsTenantMember]
     serializer_class = DocumentSerializer
+    pagination_class = DocumentCursorPagination
+    filterset_class = DocumentFilter
 
     def get_permissions(self):
         if self.action == "create":
@@ -78,3 +86,4 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document = self.get_object()
         process_document_upload.delay(document.id)
         return Response({"status": document.status}, status=202)
+
