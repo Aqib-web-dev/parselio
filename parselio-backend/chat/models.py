@@ -21,6 +21,9 @@ class Message(models.Model):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="messages")
     role = models.CharField(max_length=20, choices=Role.choices)
     content = models.TextField()
+    input_tokens = models.PositiveIntegerField(null=True, blank=True)
+    output_tokens = models.PositiveIntegerField(null=True, blank=True)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

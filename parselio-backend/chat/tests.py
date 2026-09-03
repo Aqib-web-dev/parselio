@@ -13,11 +13,13 @@ def test_chat_returns_answer_with_mocked_pipeline():
     chunk = DocumentChunkFactory(document__tenant=membership.tenant)
     client = authenticated_client(membership.user)
 
+    mocked_usage = {"model": "groq/openai/gpt-oss-120b", "input_tokens": 10, "output_tokens": 5}
+
     with mock.patch("chat.views.retrieve", return_value=[chunk]), \
          mock.patch("chat.views.rerank", return_value=[chunk]), \
-         mock.patch("chat.views.generate_answer", return_value="Mocked answer."):
+         mock.patch("chat.views.generate_answer", return_value=("Mocked answer.", mocked_usage)):
 
-        response = client.post("/api/chat/", {"query": "What is the leave policy?"}, format="json")
+        response = client.post("/api/v1/chat/", {"query": "What is the leave policy?"}, format="json")
 
     assert response.status_code == 200
     assert response.data["answer"] == "Mocked answer."
@@ -43,7 +45,7 @@ def test_chat_rejects_conversation_id_from_another_tenant():
 
     with pytest.raises(Conversation.DoesNotExist):
         attacker_client.post(
-            "/api/chat/",
+            "/api/v1/chat/",
             {"query": "anything", "conversation_id": str(victim_conversation.id)},
             format="json",
         )

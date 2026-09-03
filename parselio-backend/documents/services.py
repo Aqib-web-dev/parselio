@@ -270,9 +270,18 @@ def generate_answer(query, chunks, history=None):
     messages.append({"role": "user", "content": build_prompt(query, chunks)})
     try:
         response = completion(model=GENERATION_MODEL, messages=messages, timeout=PRIMARY_MODEL_TIMEOUT_SECONDS)
+        model_used = GENERATION_MODEL
     except (ServiceUnavailableError, LiteLLMTimeout):
         response = completion(model=FALLBACK_GENERATION_MODEL, messages=messages)
-    return response.choices[0].message.content
+        model_used = FALLBACK_GENERATION_MODEL
+
+    usage = {
+        "model": model_used,
+        "input_tokens": response.usage.prompt_tokens,
+        "output_tokens": response.usage.completion_tokens,
+    }
+    
+    return response.choices[0].message.content, usage
 
 def generate_answer_stream(query, chunks, history=None):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]

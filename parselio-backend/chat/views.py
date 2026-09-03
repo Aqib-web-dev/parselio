@@ -1,5 +1,6 @@
 import json
 
+from django.db.models import query
 from django.http import StreamingHttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -10,6 +11,10 @@ from documents.services import retrieve, rerank, generate_answer, generate_answe
 from .serializers import ChatRequestSerializer, ChatResponseSerializer
 from .throttles import TenantRateThrottle
 from .models import Conversation, Message
+from documents.pricing import calculate_cost
+from django.db.models import Sum
+from django.db.models.functions import TruncDate
+from tenants.permissions import IsTenantAdmin
 
 MAX_HISTORY_MESSAGES = 10
 
@@ -37,11 +42,14 @@ class ChatView(APIView):
 
         candidates = retrieve(request.tenant, request.user, query)
         top_chunks = rerank(query, candidates)
-        answer_text = generate_answer(query, top_chunks, history=history)
+        answer_text, usage = generate_answer(query, top_chunks, history=history)
+        cost = calculate_cost(usage["model"], usage["input_tokens"], usage["output_tokens"])
 
         Message.objects.create(conversation=conversation, role=Message.Role.USER, content=query)
-        Message.objects.create(conversation=conversation, role=Message.Role.ASSISTANT, content=answer_text)
-        record_usage(request.tenant, tokens_used=len(answer_text.split()))
+        Message.objects.create(conversation=conversation, role=Message.Role.ASSISTANT, content=answer_text,
+        input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"], cost_usd=cost,
+        )
+        record_usage(request.tenant, tokens_used=usage["input_tokens"] + usage["output_tokens"])
 
         response_data = {
             "answer": answer_text,
@@ -90,3 +98,33 @@ class ChatStreamView(APIView):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+class UsageSummaryView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantAdmin]
+
+    def get(self, request):
+        start = request.query_params.get("start")
+        end = request.query_params.get("end")
+
+        qs = Message.objects.filter(
+            conversation__tenant=request.tenant,
+            role=Message.Role.ASSISTANT,
+            cost_usd__isnull=False,
+        )
+        if start:
+            qs = qs.filter(created_at__date__gte=start)
+        if end:
+            qs = qs.filter(created_at__date__lte=end)
+
+        rows = (
+            qs.annotate(day=TruncDate("created_at"))
+              .values("day")
+              .annotate(
+                  total_cost_usd=Sum("cost_usd"),
+                  total_input_tokens=Sum("input_tokens"),
+                  total_output_tokens=Sum("output_tokens"),
+                  message_count=Sum(1),
+              )
+              .order_by("day")
+        )
+        return Response(list(rows))
