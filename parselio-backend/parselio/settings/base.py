@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from celery.schedules import crontab
 
 import environ
 
@@ -23,6 +24,8 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
     "django_filters",
+    "django_celery_beat",
+    "django_celery_results",
 
     # Local apps
     "accounts",
@@ -59,6 +62,8 @@ SIMPLE_JWT = {
 }
 
 AUTH_USER_MODEL = "accounts.User"
+
+CELERY_RESULT_BACKEND = "django-db"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -158,4 +163,11 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": env("REDIS_CACHE_URL", default="redis://localhost:6379/2"),
     }
+}
+
+CELERY_BEAT_SCHEDULE = {
+    "retry-failed-documents-nightly": {
+        "task": "documents.tasks.retry_failed_documents",
+        "schedule": crontab(hour=2, minute=0),
+    },
 }

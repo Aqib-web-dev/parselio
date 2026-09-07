@@ -73,3 +73,17 @@ def process_document_upload(self, document_id):
         document.status = Document.Status.FAILED
         document.save(update_fields=["status"])
         raise self.retry(exc=exc)        # Celery re-queues; the idempotent delete above makes re-runs safe
+
+
+@shared_task
+def retry_failed_documents():
+    failed_ids = list(
+        Document.objects.filter(status=Document.Status.FAILED)
+        .values_list("id", flat=True)
+    )
+    for document_id in failed_ids:
+        Document.objects.filter(id=document_id).update(
+            status=Document.Status.UPLOADED
+        )
+        process_document_upload.delay(document_id)
+    return {"retried_count": len(failed_ids)}
