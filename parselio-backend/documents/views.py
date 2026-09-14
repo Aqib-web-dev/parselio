@@ -33,7 +33,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     filterset_class = DocumentFilter
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "upload_url"):
             return [
                 IsAuthenticated(),
                 IsTenantMember(),

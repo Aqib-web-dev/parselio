@@ -337,6 +337,30 @@ def test_upload_url_returns_presigned_url_for_valid_request(mock_presign):
     mock_presign.assert_called_once()
 
 
+def test_upload_url_rejects_member_uploading_company_document():
+    """A plain member must be denied a company-wide upload via upload-url, not just create.
+
+    get_permissions() must attach CanUploadCompanyDocument/CanUploadTeamDocument for the
+    "upload_url" action (self.action is the method name, not the url_path "upload-url") -
+    otherwise this falls through to IsAuthenticated/IsTenantMember only and the serializer's
+    own validate() ends up as the sole (400, not 403) gate.
+    """
+    tenant = create_tenant()
+    user, _membership = create_membership(tenant, "regular")  # default role: MEMBER
+    client = authenticated_client(user)
+
+    response = client.post(
+        reverse("document-upload-url"),
+        {
+            "title": "Q3 Report", "original_filename": "q3.pdf",
+            "content_type": "application/pdf", "file_size": 500_000,
+            "visibility": "company", "team": "",
+        },
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
 # ---------------------------------------------------------------------------
 # Day 9 — Celery background task: process_document_upload
 #
