@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+db.sqlite3
+celerybeat-schedule.db
+dump.rdb
+.env
+.git/
+eval_baseline.json
